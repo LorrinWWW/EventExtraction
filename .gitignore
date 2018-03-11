@@ -1,0 +1,6 @@
+*.pkl
+*.utf8
+*.zip
+*.rar
+__pycache__/*
+.ipynb_checkpoints/*
