@@ -52,6 +52,7 @@ class Model:
 
         # bi-directional lstm layer
         lstm_outputs = self.biLSTM_layer(lstm_inputs, self.lstm_dim, self.lengths)
+        lstm_outputs = self.biLSTM_layer(lstm_outputs, self.lstm_dim, self.lengths, name="2_lstm")
 
         # logits for tags
         self.logits = self.project_layer(lstm_outputs)
