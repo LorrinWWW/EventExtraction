@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 import tensorflow as tf
 from tensorflow.contrib.crf import crf_log_likelihood
@@ -6,8 +8,31 @@ from tensorflow.contrib.layers.python.layers import initializers
 
 import rnncell as rnn
 
+from data_utils import iobes_iob
+
 class Model:
     def __init__(self, config):
+        self.construct(config)
+        
+    def load(self, sess, path, load_vec, config, id_to_char, logger):
+        ckpt = tf.train.get_checkpoint_state(path)
+        if ckpt and tf.train.checkpoint_exists(ckpt.model_checkpoint_path):
+            logger.info("Reading model parameters from %s" % ckpt.model_checkpoint_path)
+            self.saver.restore(sess, ckpt.model_checkpoint_path)
+        else:
+            logger.info("Initialize model with fresh parameters.")
+            sess.run(tf.global_variables_initializer())
+            if config["pre_emb"]:
+                emb_weights = sess.run(self.char_lookup.read_value())
+                emb_weights = load_vec(config["emb_file"], id_to_char, config["char_dim"], emb_weights)
+                sess.run(self.char_lookup.assign(emb_weights))
+                logger.info("Load pre-trained embedding.")
+                
+    def save(self, sess, path, model_name="ee.ckpt"):
+        checkpoint_path = os.path.join(path, model_name)
+        self.saver.save(sess, checkpoint_path)
+        
+    def construct(self, config):
         self.config = config
         # TODO: use a tensor type lr rate so learning rate could be dynamic
         self.lr = config['lr']
@@ -21,8 +46,8 @@ class Model:
         self.num_segs = 4
 
         self.global_step = tf.Variable(0, trainable=False)
-        self.best_dev_f1 = tf.Variable(0.0, trainable=False)
-        self.best_test_f1 = tf.Variable(0.0, trainable=False)
+        self.best_dev_score = tf.Variable(0.0, trainable=False)
+        self.best_test_score = tf.Variable(0.0, trainable=False)
         self.initializer = initializers.xavier_initializer()
         
         self.dataset = {} # a set of dataset
@@ -99,7 +124,6 @@ class Model:
         '''
         if batch_size == 0:
             batch_size = self.config['batch_size']
-        print(batch_size)
         dataset_batch = self.dataset[dataset_name].padded_batch(batch_size, 
                 padded_shapes=(tf.TensorShape([None]), tf.TensorShape([None]), tf.TensorShape([None])))
         dataset_batch = dataset_batch.shuffle(shuffle) if shuffle else dataset_batch
@@ -254,8 +278,9 @@ class Model:
                 feed_dict)
             return global_step, loss
         else:
-            lengths, logits = sess.run([self.lengths, self.logits], feed_dict)
-            return lengths, logits
+            inputs, targets, lengths, logits = sess.run(
+                [self.char_inputs, self.targets, self.lengths, self.logits], feed_dict)
+            return inputs, targets, lengths, logits
         
     def decode(self, logits, lengths, matrix):
         """
@@ -284,26 +309,29 @@ class Model:
             labels_pred = np.cast['int'](np.argmax(logits, axis=-1))
             return labels_pred
         
-    def evaluate(self, sess, data_manager, id_to_tag):
-        """
-        :param sess: session  to run the model 
-        :param data: list of data
-        :param id_to_tag: index to tag name
-        :return: evaluate result
-        """
+    def evaluate(self, sess, dataset_name, id_to_tag, id_to_char):
+        sess.run(self.make_dataset_init(dataset_name))
         results = []
         trans = self.trans.eval()
-        for batch in data_manager.iter_batch():
-            strings = batch[0]
-            tags = batch[-1]
-            lengths, scores = self.run_step(sess, False, batch)
-            batch_paths = self.decode(scores, lengths, trans)
-            for i in range(len(strings)):
-                result = []
-                string = strings[i][:lengths[i]]
-                gold = iobes_iob([id_to_tag[int(x)] for x in tags[i][:lengths[i]]])
-                pred = iobes_iob([id_to_tag[int(x)] for x in batch_paths[i][:lengths[i]]])
-                for char, gold, pred in zip(string, gold, pred):
-                    result.append(" ".join([char, gold, pred]))
-                results.append(result)
+        try:
+            while True:
+                inputs, tags, lengths, scores = self.run_step(sess, False)
+                batch_paths = self.decode(scores, lengths, trans)
+                for i in range(len(inputs)):
+                    inp = inputs[i][:lengths[i]]
+                    string = [id_to_char[ip] for ip in inp]
+                    gold = iobes_iob([id_to_tag[int(x)] for x in tags[i][:lengths[i]]])
+                    pred = iobes_iob([id_to_tag[int(x)] for x in batch_paths[i][:lengths[i]]])
+                    results.append([string, gold, pred])
+                    
+        except tf.errors.OutOfRangeError:
+            pass
+        
         return results
+
+    def evaluate_line(self, sess, inputs, id_to_tag):
+        trans = self.trans.eval()
+        lengths, scores = self.run_step(sess, False, inputs)
+        batch_paths = self.decode(scores, lengths, trans)
+        tags = [id_to_tag[idx] for idx in batch_paths[0]]
+        return result_to_json(inputs[0][0], tags)

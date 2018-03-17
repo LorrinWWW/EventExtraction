@@ -4,3 +4,8 @@
 *.rar
 __pycache__/*
 .ipynb_checkpoints/*
+log/*
+ckpt/*
+*.log
+
+config_file
